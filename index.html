@@ -1,0 +1,928 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Chesapeake Oyster Reef — Place Oysters + Human Events</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin:0; background:#0b1320; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+    #wrap { display:flex; flex-direction:column; height:100vh; }
+    #topbar{
+      padding:10px 12px; background:#0f1b2e; border-bottom:1px solid rgba(255,255,255,.08);
+      display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+    }
+    .pill{
+      padding:6px 10px; border:1px solid rgba(255,255,255,.12);
+      border-radius:999px; background:rgba(255,255,255,.04);
+      font-size:13px; white-space:nowrap;
+    }
+    .pill b{ font-weight:700; }
+    #panel{ margin-left:auto; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    button{
+      background:#1a2b45; color:#e8f0ff; border:1px solid rgba(255,255,255,.14);
+      padding:8px 10px; border-radius:10px; cursor:pointer; font-size:13px;
+    }
+    button:hover{ filter:brightness(1.08); }
+    button:disabled{ opacity:.45; cursor:not-allowed; }
+    #msg{ opacity:.92; font-size:13px; min-width: 220px; }
+    canvas{ width:100%; height:100%; display:block; }
+    #footer{
+      padding:10px 12px; background:#0f1b2e; border-top:1px solid rgba(255,255,255,.08);
+      font-size:13px; display:flex; flex-wrap:wrap; gap:10px; align-items:center;
+    }
+    .hint{ opacity:.85; }
+    .mode{ padding:4px 8px; border-radius:999px; border:1px solid rgba(255,255,255,.18); background:rgba(255,255,255,.06); }
+  </style>
+</head>
+<body>
+<div id="wrap">
+  <div id="topbar">
+    <div class="pill">Water: <b id="waterLabel">—</b></div>
+    <div class="pill">Nutrients: <b id="nutLabel">—</b></div>
+    <div class="pill">Reef: <b id="reefLabel">—</b></div>
+    <div class="pill">Human pressure: <b id="pressureLabel">—</b></div>
+    <div class="pill">Pred cap: <b id="capLabel">—</b></div>
+    <div class="pill">Next predator: <b id="nextPredLabel">—</b></div>
+    <div class="pill">Selected: <b id="selLabel">—</b></div>
+
+    <div id="panel">
+      <button id="placeBtn">Place New Oyster</button>
+      <button id="growBtn">Grow (Lvl+1)</button>
+      <button id="filterBtn">Improve Filtering</button>
+      <button id="restartBtn">Restart</button>
+      <span id="msg"></span>
+    </div>
+  </div>
+
+  <canvas id="game"></canvas>
+
+  <div id="footer">
+    <span class="hint">
+      <span class="mode" id="modeLabel">Mode: Normal</span>
+      Click an oyster to select. Auto-collect happens inside each oyster’s circle.
+      Big pollution harms small oysters (pollution must be smaller than oyster to be filtered safely).
+      Human events raise pollution over time, so maintaining a reef matters.
+    </span>
+  </div>
+</div>
+
+<script>
+(() => {
+  // ---------------- Canvas ----------------
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d', { alpha:false });
+
+  let dpr = 1;
+  function resize() {
+    dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+    canvas.width = Math.floor(canvas.clientWidth * dpr);
+    const top = document.getElementById('topbar').offsetHeight;
+    const foot = document.getElementById('footer').offsetHeight;
+    const h = Math.max(260, window.innerHeight - top - foot);
+    canvas.height = Math.floor(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  window.addEventListener('resize', () => { resize(); }); // positions are normalized; no re-centering bug now
+
+  // ---------------- UI ----------------
+  const waterLabel = document.getElementById('waterLabel');
+  const nutLabel   = document.getElementById('nutLabel');
+  const reefLabel  = document.getElementById('reefLabel');
+  const pressureLabel = document.getElementById('pressureLabel');
+  const capLabel   = document.getElementById('capLabel');
+  const nextPredLabel = document.getElementById('nextPredLabel');
+  const selLabel   = document.getElementById('selLabel');
+
+  const msgEl = document.getElementById('msg');
+  const modeLabel = document.getElementById('modeLabel');
+
+  const placeBtn  = document.getElementById('placeBtn');
+  const growBtn   = document.getElementById('growBtn');
+  const filterBtn = document.getElementById('filterBtn');
+  document.getElementById('restartBtn').addEventListener('click', reset);
+
+  // ---------------- Tuning ----------------
+  const TUNE = {
+    // Water 0..100
+    waterStart: 62,
+    cleanThreshold: 72,
+    veryDirtyThreshold: 35,
+
+    // Floaters
+    foodSpawnRate: 1.05,
+    pollSpawnRate: 0.55,
+
+    foodLife: 10.0,
+    pollLife: 11.0,
+
+    // Add a gentle “current” so floaters don’t get stranded in huge viewports
+    currentTowardCenter: 22,  // pixels/sec pull toward center (soft)
+
+    // Oyster levels
+    maxLevel: 5,
+    baseMaxHealth: 10,
+    baseCollectRadius: 78,
+    collectRadiusPerLevel: 18,
+
+    baseCleanPerSec: 0.20,
+
+    naturalFoulPerSec: 0.22,  // baseline water decline (human pressure adds more)
+
+    // Pollution interaction
+    safePollutionWaterGain: 0.55,
+    harmfulPollutionWaterLoss: 1.05,
+    harmfulPollutionDamageBase: 1,
+
+    // Nutrients
+    planktonNutrients: 1.0,
+    cleanWaterNutrientMultiplier: 1.30,
+
+    // Budding (automatic “reef growth”)
+    budThreshold: 16,
+
+    // Costs
+    placeOysterCost: 12,        // NEW: create oyster button cost
+    growBaseCost: 14,
+    growCostPerLevel: 10,
+    filterBaseCost: 10,
+    filterCostPerTier: 10,
+
+    // Predator schedule
+    graceSeconds: 25,
+    predatorEverySeconds: 120,
+    tierCapIncreaseEverySeconds: 300,
+    predatorApproachSeconds: 7.5,
+  };
+
+  // Predator tiers and appetites
+  const PRED = {
+    1: { name:"Small",  color:"rgba(255,140,120,0.9)", requires:{ type:"exact", options:[[1]] } },
+    2: { name:"Medium", color:"rgba(255,110,120,0.9)", requires:{ type:"exact", options:[[2],[1,1]] } },
+    3: { name:"Large",  color:"rgba(255,85,120,0.9)",  requires:{ type:"exact", options:[[3]] } },
+    4: { name:"Apex",   color:"rgba(255,60,110,0.92)", requires:{ type:"sum", minSum:5 } },
+  };
+
+  // ---------------- State ----------------
+  // Floaters are stored in normalized coords (0..1) so resizing never “breaks” the geometry.
+  /** @type {{xN:number,yN:number,vx:number,vy:number,kind:'food'|'pollution',life:number,r:number}[]} */
+  let floaters = [];
+
+  // Oysters are normalized positions too.
+  /** @type {{id:number,xN:number,yN:number,level:number,health:number,maxHealth:number,filterTier:number,bud:number}[]} */
+  let oysters = [];
+
+  let selectedId = 0;
+  let nutrients = 0;
+  let water = 60;
+  let gameOver = false;
+
+  let lastTime = performance.now();
+  let elapsedSeconds = 0;
+
+  let foodAcc = 0;
+  let pollAcc = 0;
+
+  let predatorAcc = 0;
+  let predatorTierCap = 1;
+
+  /** @type {{active:boolean,tier:number,x:number,y:number,spawnAt:number} | null} */
+  let predator = null;
+
+  // Placement mode
+  let placing = false;
+
+  // Human pressure system
+  // pressure increases slowly over time, and spikes with events; it boosts pollution spawns + water fouling.
+  let pressure = 0; // 0..100-ish
+  let nextHumanEventAt = 0;
+
+  // ---------------- Helpers ----------------
+  function clamp(v,a,b){ return Math.max(a, Math.min(b,v)); }
+  function rand(a,b){ return a + Math.random()*(b-a); }
+  function randi(a,b){ return Math.floor(rand(a,b+1)); }
+  function dist2(ax,ay,bx,by){ const dx=ax-bx, dy=ay-by; return dx*dx+dy*dy; }
+
+  function W(){ return canvas.clientWidth; }
+  function H(){ return canvas.height / dpr; }
+
+  function pxFromN(xN, yN){ return { x: xN * W(), y: yN * H() }; }
+  function nFromPx(x, y){ return { xN: clamp(x / W(), 0, 1), yN: clamp(y / H(), 0, 1) }; }
+
+  function centerPx(){ return { x: W()/2, y: H()/2 }; }
+
+  function oysterRadius(level){ return 14 + level*7; }
+  function collectRadius(level){ return TUNE.baseCollectRadius + (level-1)*TUNE.collectRadiusPerLevel; }
+
+  function makeOyster(xN,yN,level=1){
+    const maxHealth = TUNE.baseMaxHealth + (level-1)*2;
+    return {
+      id: (Math.random()*1e9)|0,
+      xN, yN,
+      level,
+      health: maxHealth,
+      maxHealth,
+      filterTier: 0,
+      bud: 0,
+    };
+  }
+
+  function getSelected(){
+    return oysters.find(o => o.id === selectedId) || oysters[0] || null;
+  }
+
+  function isClean(){ return water >= TUNE.cleanThreshold; }
+  function isVeryDirty(){ return water <= TUNE.veryDirtyThreshold; }
+
+  // ---------------- Messages ----------------
+  let msgUntil = 0;
+  function msg(text){
+    msgEl.textContent = text;
+    msgUntil = performance.now() + 2800;
+  }
+
+  // ---------------- Human Events ----------------
+  function scheduleFirstHumanEvent(){
+    // short grace; then first event after 45–75s
+    nextHumanEventAt = elapsedSeconds + rand(45, 75);
+  }
+
+  function triggerHumanEvent(){
+    // Weighted random; later game tends toward harsher outcomes.
+    const t = elapsedSeconds;
+    const late = clamp((t - 120) / 600, 0, 1); // after 2 min, ramp toward "industrial"
+    const roll = Math.random();
+
+    if (roll < 0.33 + 0.20*late) {
+      // Factory built (persistent increase)
+      const bump = rand(6, 12);
+      pressure += bump;
+      msg(`🏭 A factory was built near the Bay. Pollution pressure rises (+${bump.toFixed(0)}).`);
+      // Next event sooner (momentum)
+      nextHumanEventAt = elapsedSeconds + rand(40, 70);
+      return;
+    }
+
+    if (roll < 0.70) {
+      // Wastewater discharge (spike + short surge)
+      const spike = rand(8, 16);
+      pressure += spike;
+      // Short-term burst: add temporary pressure that decays
+      tempPressure.push({ amount: rand(10, 18), until: performance.now() + rand(35_000, 55_000) });
+      msg(`🚰 Wastewater discharge. Short surge + long-term pressure (+${spike.toFixed(0)}).`);
+      nextHumanEventAt = elapsedSeconds + rand(55, 95);
+      return;
+    }
+
+    // Road salt runoff (medium persistent, slightly seasonal)
+    const salt = rand(7, 13);
+    pressure += salt;
+    msg(`🧂 Road salt runoff reached the Bay. Pollution pressure rises (+${salt.toFixed(0)}).`);
+    nextHumanEventAt = elapsedSeconds + rand(60, 110);
+  }
+
+  // temp pressure surges
+  /** @type {{amount:number, until:number}[]} */
+  let tempPressure = [];
+
+  function currentPressure(){
+    const now = performance.now();
+    tempPressure = tempPressure.filter(p => p.until > now);
+    const surge = tempPressure.reduce((a,p)=>a+p.amount,0);
+    return clamp(pressure + surge, 0, 120);
+  }
+
+  // ---------------- Spawning Floaters ----------------
+  function spawnFloater(kind){
+    const side = randi(0,3);
+    let xN,yN,vx,vy;
+
+    const baseSpeed = kind === 'food' ? rand(18, 36) : rand(14, 30);
+
+    if (side === 0) { xN=-0.03; yN=rand(0.08,0.92); vx= baseSpeed; vy= rand(-10,10); }
+    if (side === 1) { xN= 1.03; yN=rand(0.08,0.92); vx=-baseSpeed; vy= rand(-10,10); }
+    if (side === 2) { xN=rand(0.08,0.92); yN=-0.03; vx= rand(-10,10); vy= baseSpeed; }
+    if (side === 3) { xN=rand(0.08,0.92); yN= 1.03; vx= rand(-10,10); vy=-baseSpeed; }
+
+    // pollution size grows when water dirty + pressure high
+    let r;
+    if (kind === 'food'){
+      r = rand(8, 13);
+    } else {
+      const dirt = 1 - clamp(water/100, 0, 1);
+      const p01 = clamp(currentPressure()/100, 0, 1);
+      r = rand(9, 15) + dirt*rand(0,10) + p01*rand(0,8);
+    }
+
+    floaters.push({
+      xN, yN,
+      vx, vy, // pixels/sec (we’ll integrate in pixel space then convert back)
+      kind,
+      life: kind === 'food' ? TUNE.foodLife : TUNE.pollLife,
+      r
+    });
+  }
+
+  // ---------------- Predator logic ----------------
+  function tierName(t){ return PRED[t]?.name || "??"; }
+
+  function tierCapFromTime(seconds){
+    const bumps = Math.floor(Math.max(0, seconds - TUNE.graceSeconds) / TUNE.tierCapIncreaseEverySeconds);
+    return clamp(1 + bumps, 1, 4);
+  }
+
+  function spawnPredatorEvent(){
+    const cap = predatorTierCap;
+    let tier = 1;
+    const roll = Math.random();
+
+    if (cap === 1) tier = 1;
+    else if (cap === 2) tier = roll < 0.55 ? 2 : 1;
+    else if (cap === 3) tier = roll < 0.50 ? 3 : (roll < 0.80 ? 2 : 1);
+    else tier = roll < 0.45 ? 4 : (roll < 0.70 ? 3 : (roll < 0.88 ? 2 : 1));
+
+    // spawn offscreen in pixel space
+    const side = randi(0,3);
+    let x,y;
+    if (side === 0) { x=-90; y=rand(40,H()-40); }
+    if (side === 1) { x=W()+90; y=rand(40,H()-40); }
+    if (side === 2) { x=rand(40,W()-40); y=-90; }
+    if (side === 3) { x=rand(40,W()-40); y=H()+90; }
+
+    predator = { active:true, tier, x, y, spawnAt: performance.now() };
+    msg(`⚠️ ${tierName(tier)} predator incoming (${Math.ceil(TUNE.predatorApproachSeconds)}s)!`);
+  }
+
+  function chooseVictimsForPredator(tier){
+    if (oysters.length === 0) return null;
+
+    function tryExact(option){
+      const need = option.slice().sort((a,b)=>a-b);
+      const available = oysters.slice().sort((a,b)=>a.level-b.level);
+      const victims = [];
+      for (const req of need){
+        const idx = available.findIndex(o => o.level === req);
+        if (idx < 0) return null;
+        victims.push(available[idx]);
+        available.splice(idx,1);
+      }
+      return victims;
+    }
+
+    if (tier <= 3){
+      const options = PRED[tier].requires.options.slice().sort((a,b)=>a.length-b.length);
+      for (const opt of options){
+        const v = tryExact(opt);
+        if (v) return v;
+      }
+      return null;
+    }
+
+    // Apex: sum >= 5, sacrifice lowest levels first
+    const available = oysters.slice().sort((a,b)=>a.level-b.level);
+    let sum = 0;
+    const victims = [];
+    for (const o of available){
+      victims.push(o);
+      sum += o.level;
+      if (sum >= 5) break;
+    }
+    return sum >= 5 ? victims : null;
+  }
+
+  function eatVictims(victims){
+    const ids = new Set(victims.map(v => v.id));
+    oysters = oysters.filter(o => !ids.has(o.id));
+    if (!getSelected()) selectedId = oysters[0]?.id || 0;
+  }
+
+  // ---------------- Upgrades ----------------
+  function growCost(o){
+    return TUNE.growBaseCost + (o.level-1)*TUNE.growCostPerLevel;
+  }
+  function filterCost(o){
+    return TUNE.filterBaseCost + o.filterTier*TUNE.filterCostPerTier;
+  }
+
+  function growSelected(){
+    const o = getSelected();
+    if (!o || gameOver) return;
+    if (o.level >= TUNE.maxLevel) return msg("Max level reached (5).");
+    const cost = growCost(o);
+    if (nutrients < cost) return msg(`Need ${cost} nutrients to grow.`);
+    nutrients -= cost;
+    o.level += 1;
+    const newMax = TUNE.baseMaxHealth + (o.level-1)*2;
+    const delta = newMax - o.maxHealth;
+    o.maxHealth = newMax;
+    o.health = clamp(o.health + delta, 0, o.maxHealth);
+    msg(`Grew oyster to Level ${o.level}.`);
+  }
+
+  function improveFilterSelected(){
+    const o = getSelected();
+    if (!o || gameOver) return;
+    const cost = filterCost(o);
+    if (nutrients < cost) return msg(`Need ${cost} nutrients to improve filtering.`);
+    nutrients -= cost;
+    o.filterTier += 1;
+    msg(`Filtering improved (Tier ${o.filterTier}).`);
+  }
+
+  growBtn.addEventListener('click', growSelected);
+  filterBtn.addEventListener('click', improveFilterSelected);
+
+  // NEW: Place oyster mode
+  placeBtn.addEventListener('click', () => {
+    if (gameOver) return;
+    if (placing) {
+      placing = false;
+      modeLabel.textContent = "Mode: Normal";
+      msg("Placement cancelled.");
+      return;
+    }
+    if (nutrients < TUNE.placeOysterCost) return msg(`Need ${TUNE.placeOysterCost} nutrients to place a new oyster.`);
+    placing = true;
+    modeLabel.textContent = "Mode: Place Oyster (click map)";
+    msg("Click anywhere in the Bay to place a new Level 1 oyster.");
+  });
+
+  // ---------------- Auto-collect ----------------
+  function planktonGain(){
+    let gain = TUNE.planktonNutrients;
+    if (isClean()) gain *= TUNE.cleanWaterNutrientMultiplier;
+    return gain;
+  }
+
+  function applyPollutionToOyster(o, pollutionR){
+    const oR = oysterRadius(o.level);
+    const p01 = clamp(currentPressure()/100, 0, 1);
+
+    if (pollutionR <= oR) {
+      water = clamp(water + TUNE.safePollutionWaterGain, 0, 100);
+    } else {
+      const gap = pollutionR - oR;
+      const extra = gap > 8 ? 1 : 0;
+      // human pressure makes harmful hits slightly worse
+      const dmg = TUNE.harmfulPollutionDamageBase + extra + (p01 > 0.7 ? 1 : 0);
+      o.health = clamp(o.health - dmg, 0, o.maxHealth);
+      water = clamp(water - TUNE.harmfulPollutionWaterLoss, 0, 100);
+    }
+  }
+
+  function maybeSpawnBud(o){
+    if (o.bud < TUNE.budThreshold) return;
+    o.bud -= TUNE.budThreshold;
+
+    // spawn nearby
+    const { x, y } = pxFromN(o.xN, o.yN);
+    const ang = rand(0, Math.PI*2);
+    const rad = rand(26, 62);
+    const nx = clamp(x + Math.cos(ang)*rad, 35, W()-35);
+    const ny = clamp(y + Math.sin(ang)*rad, 35, H()-35);
+    const n = nFromPx(nx, ny);
+
+    oysters.push(makeOyster(n.xN, n.yN, 1));
+    msg("A new Level 1 oyster joined the reef.");
+  }
+
+  // ---------------- Input ----------------
+  canvas.addEventListener('pointerdown', (e) => {
+    if (gameOver) return;
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+
+    // If in placing mode: place oyster at click
+    if (placing) {
+      if (nutrients < TUNE.placeOysterCost) {
+        placing = false;
+        modeLabel.textContent = "Mode: Normal";
+        return msg(`Not enough nutrients (${TUNE.placeOysterCost}) to place.`);
+      }
+      nutrients -= TUNE.placeOysterCost;
+      const n = nFromPx(mx, my);
+      const o = makeOyster(n.xN, n.yN, 1);
+      oysters.push(o);
+      selectedId = o.id;
+      placing = false;
+      modeLabel.textContent = "Mode: Normal";
+      msg("Placed a new Level 1 oyster.");
+      return;
+    }
+
+    // Otherwise: click oysters to select
+    for (let i=oysters.length-1; i>=0; i--){
+      const o = oysters[i];
+      const p = pxFromN(o.xN, o.yN);
+      const r = oysterRadius(o.level) + 6;
+      if (dist2(mx,my,p.x,p.y) <= r*r){
+        selectedId = o.id;
+        msg(`Selected Level ${o.level} oyster.`);
+        return;
+      }
+    }
+  });
+
+  // ---------------- Game over ----------------
+  function checkGameOver(){
+    oysters = oysters.filter(o => o.health > 0);
+    if (oysters.length === 0){
+      gameOver = true;
+      predator = null;
+      placing = false;
+      modeLabel.textContent = "Mode: Normal";
+      msg("Reef collapsed.");
+    }
+  }
+
+  // ---------------- Update ----------------
+  function update(dt){
+    if (gameOver) return;
+
+    elapsedSeconds += dt;
+    predatorTierCap = tierCapFromTime(elapsedSeconds);
+
+    // Human pressure slowly rises even without events (development creep)
+    pressure = clamp(pressure + 0.010*dt, 0, 120);
+
+    // Events: factory/wastewater/road salt
+    if (nextHumanEventAt === 0) scheduleFirstHumanEvent();
+    if (elapsedSeconds >= nextHumanEventAt) triggerHumanEvent();
+
+    const pNow = currentPressure(); // 0..120
+    const p01 = clamp(pNow/100, 0, 1);
+
+    // Spawn rates depend on water AND pressure
+    const w01 = clamp(water/100, 0, 1);
+
+    const foodRate = TUNE.foodSpawnRate * (0.72 + 0.72*w01) * (1.00 - 0.25*p01);
+    const pollRate = TUNE.pollSpawnRate * (0.55 + 1.55*(1-w01)) * (1.00 + 0.95*p01);
+
+    foodAcc += dt * foodRate;
+    pollAcc += dt * pollRate;
+
+    while (foodAcc >= 1) { foodAcc -= 1; spawnFloater('food'); }
+    while (pollAcc >= 1) { pollAcc -= 1; spawnFloater('pollution'); }
+
+    // Move floaters in pixel space + gentle current toward center (so big fields still feed reef)
+    const c = centerPx();
+    for (let i=floaters.length-1; i>=0; i--){
+      const f = floaters[i];
+      const p = pxFromN(f.xN, f.yN);
+
+      // current to center
+      const dx = c.x - p.x;
+      const dy = c.y - p.y;
+      const d = Math.max(1, Math.hypot(dx,dy));
+      const cxv = (dx/d) * TUNE.currentTowardCenter;
+      const cyv = (dy/d) * TUNE.currentTowardCenter;
+
+      // integrate
+      const nx = p.x + (f.vx + cxv) * dt;
+      const ny = p.y + (f.vy + cyv) * dt;
+
+      // mild wander
+      f.vx += rand(-2.8, 2.8) * dt;
+      f.vy += rand(-2.8, 2.8) * dt;
+
+      const nn = nFromPx(nx, ny);
+      f.xN = nn.xN;
+      f.yN = nn.yN;
+
+      f.life -= dt;
+      if (f.life <= 0) floaters.splice(i,1);
+    }
+
+    // Reef filtering: automatic water cleaning
+    let reefClean = 0;
+    for (const o of oysters){
+      const levelBoost = 1 + (o.level-1)*0.35;
+      const filterBoost = 1 + o.filterTier*0.35;
+      reefClean += TUNE.baseCleanPerSec * levelBoost * filterBoost;
+    }
+    // diminishing returns with very high water (prevents “stuck at 100” feel)
+    const highWaterDrag = water > 90 ? (1 - (water-90)/20) : 1; // down to 0 at 110 (clamped)
+    reefClean *= clamp(highWaterDrag, 0.35, 1);
+
+    water = clamp(water + reefClean*dt, 0, 100);
+
+    // Natural fouling pressure (stronger when water is already dirty AND when pressure is high)
+    const dirt = 1 - w01;
+    const foul = TUNE.naturalFoulPerSec * (0.55 + 1.2*dirt) * (1.0 + 1.15*p01);
+    water = clamp(water - foul*dt, 0, 100);
+
+    // Auto-collect inside circles (assign to closest collecting oyster)
+    for (let i=floaters.length-1; i>=0; i--){
+      const f = floaters[i];
+      const fp = pxFromN(f.xN, f.yN);
+
+      let best = null;
+      let bestD2 = Infinity;
+
+      for (const o of oysters){
+        const op = pxFromN(o.xN, o.yN);
+        const cr = collectRadius(o.level);
+        const d2 = dist2(fp.x, fp.y, op.x, op.y);
+        if (d2 <= cr*cr && d2 < bestD2){
+          best = o; bestD2 = d2;
+        }
+      }
+
+      if (!best) continue;
+
+      // collected
+      floaters.splice(i,1);
+
+      if (f.kind === 'food'){
+        const gain = planktonGain();
+        nutrients += gain;
+        best.bud += gain;
+        maybeSpawnBud(best);
+      } else {
+        applyPollutionToOyster(best, f.r);
+      }
+    }
+
+    // Very dirty water harms small oysters more (pressure makes it worse)
+    if (isVeryDirty()){
+      for (const o of oysters){
+        const smallPenalty = (o.level <= 2 ? 0.07 : 0.03) * (1 + 0.6*p01);
+        o.health = clamp(o.health - smallPenalty*dt, 0, o.maxHealth);
+      }
+    }
+
+    // Predators
+    if (elapsedSeconds > TUNE.graceSeconds){
+      predatorAcc += dt;
+      if (predatorAcc >= TUNE.predatorEverySeconds){
+        predatorAcc -= TUNE.predatorEverySeconds;
+        spawnPredatorEvent();
+      }
+    }
+
+    if (predator?.active){
+      const age = (performance.now() - predator.spawnAt) / 1000;
+
+      // move to center
+      const { x:cx, y:cy } = centerPx();
+      const dx = cx - predator.x;
+      const dy = cy - predator.y;
+      const d = Math.max(1, Math.hypot(dx,dy));
+      const speed = 90;
+      predator.x += (dx/d) * speed * dt;
+      predator.y += (dy/d) * speed * dt;
+
+      if (age >= TUNE.predatorApproachSeconds){
+        const victims = chooseVictimsForPredator(predator.tier);
+        if (!victims){
+          oysters = [];
+          msg(`🟥 ${tierName(predator.tier)} predator overwhelmed the reef.`);
+        } else {
+          eatVictims(victims);
+          msg(`🦀 ${tierName(predator.tier)} predator ate ${victims.length} oyster${victims.length===1?"":"s"}.`);
+        }
+        predator = null;
+        checkGameOver();
+      }
+    }
+
+    if (msgUntil && performance.now() > msgUntil){
+      msgEl.textContent = "";
+      msgUntil = 0;
+    }
+
+    checkGameOver();
+  }
+
+  // ---------------- Draw ----------------
+  function draw(){
+    const w01 = clamp(water/100, 0, 1);
+    const p01 = clamp(currentPressure()/100, 0, 1);
+
+    // background (water) tint changes with water quality + pressure
+    ctx.fillStyle = `rgb(${Math.round(10 + 16*(1-w01) + 6*p01)}, ${Math.round(22 + 42*w01)}, ${Math.round(40 + 78*w01)})`;
+    ctx.fillRect(0,0,W(),H());
+
+    // haze if dirty + pressured
+    const haze = clamp((60-water)/120, 0, .35) + p01*0.08;
+    if (haze > 0.01){
+      ctx.fillStyle = `rgba(95,60,30,${clamp(haze,0,.45)})`;
+      ctx.fillRect(0,0,W(),H());
+    }
+
+    // reef zone
+    const c = centerPx();
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, 120 + oysters.length*2.0, 0, Math.PI*2);
+    ctx.fillStyle = "rgba(255,255,255,0.035)";
+    ctx.fill();
+
+    // floaters
+    for (const f of floaters){
+      const p = pxFromN(f.xN, f.yN);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, f.r, 0, Math.PI*2);
+      ctx.fillStyle = f.kind === 'food'
+        ? "rgba(210,255,215,0.88)"
+        : "rgba(255,190,120,0.88)";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(0,0,0,0.25)";
+      ctx.stroke();
+    }
+
+    // collection circles
+    for (const o of oysters){
+      const p = pxFromN(o.xN, o.yN);
+      const cr = collectRadius(o.level);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, cr, 0, Math.PI*2);
+      ctx.strokeStyle = "rgba(255,255,255,0.05)";
+      ctx.stroke();
+    }
+
+    // oysters
+    for (const o of oysters){
+      const p = pxFromN(o.xN, o.yN);
+      const r = oysterRadius(o.level);
+
+      ctx.beginPath();
+      ctx.ellipse(p.x, p.y, r*1.18, r*0.92, (o.id % 1000)/1000, 0, Math.PI*2);
+      ctx.fillStyle = "rgba(235,240,248,0.86)";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(0,0,0,0.35)";
+      ctx.stroke();
+
+      if (o.id === selectedId){
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, r+8, 0, Math.PI*2);
+        ctx.strokeStyle = "rgba(170,220,255,0.9)";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.lineWidth = 1;
+      }
+
+      // health bar
+      const bw = 52, bh = 6;
+      const hp = o.maxHealth ? (o.health/o.maxHealth) : 0;
+      ctx.fillStyle = "rgba(0,0,0,0.32)";
+      ctx.fillRect(p.x - bw/2, p.y + r + 10, bw, bh);
+      ctx.fillStyle = hp > 0.5 ? "rgba(140,255,160,0.9)" : hp > 0.25 ? "rgba(255,220,130,0.9)" : "rgba(255,120,120,0.9)";
+      ctx.fillRect(p.x - bw/2, p.y + r + 10, bw*hp, bh);
+
+      // label
+      ctx.fillStyle = "rgba(0,0,0,0.65)";
+      ctx.font = "12px system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(`L${o.level}  F${o.filterTier}`, p.x, p.y - r - 8);
+
+      // bud meter
+      const b = clamp(o.bud / TUNE.budThreshold, 0, 1);
+      ctx.fillStyle = "rgba(0,0,0,0.25)";
+      ctx.fillRect(p.x - 18, p.y - r - 2, 36, 4);
+      ctx.fillStyle = "rgba(190,240,255,0.85)";
+      ctx.fillRect(p.x - 18, p.y - r - 2, 36*b, 4);
+    }
+
+    // predator
+    if (predator?.active){
+      const tier = predator.tier;
+      const col = PRED[tier]?.color || "rgba(255,80,120,0.9)";
+      ctx.beginPath();
+      ctx.arc(predator.x, predator.y, 34, 0, Math.PI*2);
+      ctx.fillStyle = col;
+      ctx.fill();
+      ctx.strokeStyle = "rgba(0,0,0,0.35)";
+      ctx.stroke();
+
+      const age = (performance.now() - predator.spawnAt)/1000;
+      const t = clamp(age / TUNE.predatorApproachSeconds, 0, 1);
+      ctx.beginPath();
+      ctx.arc(predator.x, predator.y, 44, -Math.PI/2, -Math.PI/2 + Math.PI*2*t);
+      ctx.strokeStyle = "rgba(255,255,255,0.85)";
+      ctx.lineWidth = 4;
+      ctx.stroke();
+      ctx.lineWidth = 1;
+
+      ctx.fillStyle = "rgba(0,0,0,0.75)";
+      ctx.font = "13px system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(`${tierName(tier)}`, predator.x, predator.y + 4);
+    }
+
+    // placement crosshair hint
+    if (placing && !gameOver){
+      ctx.fillStyle = "rgba(0,0,0,0.35)";
+      ctx.fillRect(12, 12, 330, 30);
+      ctx.fillStyle = "rgba(190,240,255,0.95)";
+      ctx.font = "14px system-ui, sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText(`Place mode: click to place an oyster (cost ${TUNE.placeOysterCost}).`, 20, 32);
+    }
+
+    // game over overlay
+    if (gameOver){
+      ctx.fillStyle = "rgba(0,0,0,0.62)";
+      ctx.fillRect(0,0,W(),H());
+      ctx.fillStyle = "rgba(255,255,255,0.95)";
+      ctx.font = "34px system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("Reef collapsed.", W()/2, H()/2 - 10);
+      ctx.font = "16px system-ui, sans-serif";
+      ctx.fillText("Restart and build a resilient reef before human pressure ramps up.", W()/2, H()/2 + 22);
+    }
+  }
+
+  // ---------------- UI Update ----------------
+  function updateUI(){
+    const clean = isClean();
+    const dirty = isVeryDirty();
+    const pNow = currentPressure();
+
+    waterLabel.textContent = `${Math.round(water)}% ${clean ? "(clean)" : dirty ? "(very dirty)" : ""}`.trim();
+    nutLabel.textContent = `${Math.floor(nutrients)}`;
+    reefLabel.textContent = `${oysters.length} oyster${oysters.length===1?"":"s"}`;
+    pressureLabel.textContent = `${Math.round(pNow)}`;
+
+    capLabel.textContent = `${predatorTierCap} (${tierName(predatorTierCap)})`;
+
+    const nextIn = elapsedSeconds < TUNE.graceSeconds
+      ? `${Math.ceil(TUNE.graceSeconds - elapsedSeconds)}s (grace)`
+      : `${Math.ceil(TUNE.predatorEverySeconds - predatorAcc)}s`;
+    nextPredLabel.textContent = predator?.active ? "NOW" : nextIn;
+
+    const o = getSelected();
+    if (o){
+      selLabel.textContent = `L${o.level}/5 · HP ${Math.ceil(o.health)}/${o.maxHealth} · Filter T${o.filterTier}`;
+
+      const gCost = o.level < TUNE.maxLevel ? growCost(o) : null;
+      const fCost = filterCost(o);
+
+      growBtn.disabled = o.level >= TUNE.maxLevel || nutrients < (gCost ?? Infinity);
+      filterBtn.disabled = nutrients < fCost;
+
+      growBtn.textContent = o.level >= TUNE.maxLevel ? "Grow (Max)" : `Grow (Cost ${gCost})`;
+      filterBtn.textContent = `Improve Filtering (Cost ${fCost})`;
+    } else {
+      selLabel.textContent = "—";
+      growBtn.disabled = true;
+      filterBtn.disabled = true;
+    }
+
+    placeBtn.disabled = nutrients < TUNE.placeOysterCost;
+    placeBtn.textContent = placing ? "Cancel Placement" : `Place New Oyster (Cost ${TUNE.placeOysterCost})`;
+  }
+
+  // ---------------- Loop ----------------
+  function loop(now){
+    const dt = Math.min(0.05, (now - lastTime)/1000);
+    lastTime = now;
+
+    update(dt);
+    draw();
+    updateUI();
+
+    requestAnimationFrame(loop);
+  }
+
+  // ---------------- Reset ----------------
+  function reset(){
+    resize();
+    floaters = [];
+    oysters = [];
+    nutrients = 0;
+    water = TUNE.waterStart;
+    gameOver = false;
+
+    elapsedSeconds = 0;
+    foodAcc = 0;
+    pollAcc = 0;
+
+    predatorAcc = 0;
+    predatorTierCap = 1;
+    predator = null;
+
+    placing = false;
+    modeLabel.textContent = "Mode: Normal";
+
+    pressure = 0;
+    tempPressure = [];
+    nextHumanEventAt = 0;
+
+    const c = centerPx();
+    const n = nFromPx(c.x, c.y);
+    const start = makeOyster(n.xN, n.yN, 1);
+    oysters.push(start);
+    selectedId = start.id;
+
+    msg("Grace period: place a couple oysters, then upgrade before human pressure ramps up.");
+    lastTime = performance.now();
+  }
+
+  // Start
+  reset();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
