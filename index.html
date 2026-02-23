@@ -125,7 +125,7 @@
     baseCollectRadius: 78,
     collectRadiusPerLevel: 18,
 
-    baseCleanPerSec: 0.20,
+   baseCleanPerSec: 0.08,
 
     // Water decline (human pressure adds more)
     naturalFoulPerSec: 0.22,
@@ -255,7 +255,8 @@
     if (roll < 0.33 + 0.20*late) {
       const bump = rand(6, 12);
       pressure += bump;
-      msg(`🏭 A factory was built near the Bay. Pollution pressure rises (+${bump.toFixed(0)}).`);
+     msg(`🏭 A factory was built near the Bay. Pollution pressure rises (+${bump.toFixed(0)}).`);
+dropWaterTo(50);
       nextHumanEventAt = elapsedSeconds + rand(40, 70);
       return;
     }
@@ -264,14 +265,16 @@
       const spike = rand(8, 16);
       pressure += spike;
       tempPressure.push({ amount: rand(10, 18), until: performance.now() + rand(35_000, 55_000) });
-      msg(`🚰 Wastewater discharge. Short surge + long-term pressure (+${spike.toFixed(0)}).`);
+     msg(`🚰 Wastewater discharge. Short surge + long-term pressure (+${spike.toFixed(0)}).`);
+dropWaterTo(25);
       nextHumanEventAt = elapsedSeconds + rand(55, 95);
       return;
     }
 
     const salt = rand(7, 13);
     pressure += salt;
-    msg(`🧂 Road salt runoff reached the Bay. Pollution pressure rises (+${salt.toFixed(0)}).`);
+msg(`🧂 Road salt runoff reached the Bay. Pollution pressure rises (+${salt.toFixed(0)}).`);
+dropWaterTo(50);
     nextHumanEventAt = elapsedSeconds + rand(60, 110);
   }
 
