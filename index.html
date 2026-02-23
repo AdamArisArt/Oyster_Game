@@ -585,7 +585,7 @@ dropWaterTo(50);
     let reefClean = 0;
     for (const o of oysters){
       const levelBoost = 1 + (o.level-1)*0.35;
-      const filterBoost = 1 + o.filterTier*0.35;
+     const levelBoost = 0.08 + (o.level-1)*0.35;
       reefClean += TUNE.baseCleanPerSec * levelBoost * filterBoost;
     }
 
