@@ -113,10 +113,11 @@
     foodSpawnRate: 1.05,
     pollSpawnRate: 0.55,
 
+    // Longer lifetime so floaters can reach oysters
     foodLife: 25.0,
     pollLife: 40.0,
 
-    // Current pulls floaters toward the reef zone so large screens still feed oysters
+    // Current pulls floaters toward the reef zone
     currentTowardCenter: 22,
 
     // Oyster levels
@@ -125,7 +126,8 @@
     baseCollectRadius: 78,
     collectRadiusPerLevel: 18,
 
-   baseCleanPerSec: 0.08,
+    // Lower base clean rate
+    baseCleanPerSec: 0.08,
 
     // Water decline (human pressure adds more)
     naturalFoulPerSec: 0.22,
@@ -139,7 +141,7 @@
     planktonNutrients: 1.0,
     cleanWaterNutrientMultiplier: 1.30,
 
-    // Budding (automatic reef growth)
+    // Budding
     budThreshold: 16,
 
     // Costs
@@ -149,9 +151,9 @@
     filterBaseCost: 10,
     filterCostPerTier: 10,
 
-    // Predator schedule
-    graceSeconds: 25,
-    predatorEverySeconds: 60,
+    // Predators (engaging, not unfair)
+    graceSeconds: 35,
+    predatorEverySeconds: 120,
     tierCapIncreaseEverySeconds: 300,
     predatorApproachSeconds: 7.5,
   };
@@ -165,7 +167,6 @@
   };
 
   // ---------------- State ----------------
-  // Floaters stored in normalized coords so resizing doesn't break placement.
   /** @type {{xN:number,yN:number,vx:number,vy:number,kind:'food'|'pollution',life:number,r:number}[]} */
   let floaters = [];
 
@@ -215,6 +216,11 @@
   function oysterRadius(level){ return 14 + level*7; }
   function collectRadius(level){ return TUNE.baseCollectRadius + (level-1)*TUNE.collectRadiusPerLevel; }
 
+  // NEW: allows human events to force water down
+  function dropWaterTo(targetPercent){
+    water = Math.min(water, targetPercent);
+  }
+
   function makeOyster(xN,yN,level=1){
     const maxHealth = TUNE.baseMaxHealth + (level-1)*2;
     return {
@@ -255,8 +261,8 @@
     if (roll < 0.33 + 0.20*late) {
       const bump = rand(6, 12);
       pressure += bump;
-     msg(`🏭 A factory was built near the Bay. Pollution pressure rises (+${bump.toFixed(0)}).`);
-dropWaterTo(50);
+      msg(`🏭 A factory was built near the Bay. Pollution pressure rises (+${bump.toFixed(0)}).`);
+      dropWaterTo(50);
       nextHumanEventAt = elapsedSeconds + rand(40, 70);
       return;
     }
@@ -265,16 +271,16 @@ dropWaterTo(50);
       const spike = rand(8, 16);
       pressure += spike;
       tempPressure.push({ amount: rand(10, 18), until: performance.now() + rand(35_000, 55_000) });
-     msg(`🚰 Wastewater discharge. Short surge + long-term pressure (+${spike.toFixed(0)}).`);
-dropWaterTo(25);
+      msg(`🚰 Wastewater discharge. Short surge + long-term pressure (+${spike.toFixed(0)}).`);
+      dropWaterTo(25);
       nextHumanEventAt = elapsedSeconds + rand(55, 95);
       return;
     }
 
     const salt = rand(7, 13);
     pressure += salt;
-msg(`🧂 Road salt runoff reached the Bay. Pollution pressure rises (+${salt.toFixed(0)}).`);
-dropWaterTo(50);
+    msg(`🧂 Road salt runoff reached the Bay. Pollution pressure rises (+${salt.toFixed(0)}).`);
+    dropWaterTo(50);
     nextHumanEventAt = elapsedSeconds + rand(60, 110);
   }
 
@@ -524,7 +530,7 @@ dropWaterTo(50);
     }
   }
 
-  // ---------------- Update (FIXED floater vanish bug) ----------------
+  // ---------------- Update ----------------
   function update(dt){
     if (gameOver) return;
 
@@ -553,23 +559,20 @@ dropWaterTo(50);
     while (foodAcc >= 1) { foodAcc -= 1; spawnFloater('food'); }
     while (pollAcc >= 1) { pollAcc -= 1; spawnFloater('pollution'); }
 
-    // Move floaters (DO NOT delete here; delete after collection chance)
+    // Move floaters (do not delete here)
     const c = centerPx();
     for (const f of floaters){
       const p = pxFromN(f.xN, f.yN);
 
-      // current toward center
       const dx = c.x - p.x;
       const dy = c.y - p.y;
       const d = Math.max(1, Math.hypot(dx,dy));
       const cxv = (dx/d) * TUNE.currentTowardCenter;
       const cyv = (dy/d) * TUNE.currentTowardCenter;
 
-      // integrate
       const nx = p.x + (f.vx + cxv) * dt;
       const ny = p.y + (f.vy + cyv) * dt;
 
-      // mild wander
       f.vx += rand(-2.8, 2.8) * dt;
       f.vy += rand(-2.8, 2.8) * dt;
 
@@ -577,31 +580,34 @@ dropWaterTo(50);
       f.xN = nn.xN;
       f.yN = nn.yN;
 
-      // life tick (cleanup later)
       f.life -= dt;
     }
 
-    // Reef filtering: automatic water cleaning
+    // Reef filtering: slower growth curve for ALL levels + tiers
     let reefClean = 0;
     for (const o of oysters){
-      const levelBoost = 1 + (o.level-1)*0.35;
-     const levelBoost = 0.08 + (o.level-1)*0.35;
+      const levelBoost  = 1 + (o.level - 1) * 0.15;      // L5 = 1.60x
+      const filterBoost = 1 + (o.filterTier) * 0.15;     // Tier 3 = 1.45x
       reefClean += TUNE.baseCleanPerSec * levelBoost * filterBoost;
     }
 
-    // diminishing returns at very high water
+    // Dirty water is harder to clean (prevents instant recovery)
+    const waterPenalty = clamp(water / 100, 0.35, 1);
+    reefClean *= waterPenalty;
+
+    // diminishing returns near 100
     const highWaterDrag = water > 90 ? (1 - (water-90)/20) : 1;
     reefClean *= clamp(highWaterDrag, 0.35, 1);
 
     water = clamp(water + reefClean*dt, 0, 100);
 
-    // Natural fouling (stronger when dirty and when pressure is high)
+    // Natural fouling
     const dirt = 1 - w01;
     const foul = TUNE.naturalFoulPerSec * (0.55 + 1.2*dirt) * (1.0 + 1.15*p01);
     water = clamp(water - foul*dt, 0, 100);
 
-    // Auto-collect (with a small grace radius so near-misses feel fair)
-    const grace = 10; // pixels
+    // Auto-collect
+    const grace = 10;
     for (let i=floaters.length-1; i>=0; i--){
       const f = floaters[i];
       const fp = pxFromN(f.xN, f.yN);
@@ -621,7 +627,6 @@ dropWaterTo(50);
 
       if (!best) continue;
 
-      // collected
       floaters.splice(i,1);
 
       if (f.kind === 'food'){
@@ -659,7 +664,6 @@ dropWaterTo(50);
     if (predator?.active){
       const age = (performance.now() - predator.spawnAt) / 1000;
 
-      // move to center
       const { x:cx, y:cy } = centerPx();
       const dx = cx - predator.x;
       const dy = cy - predator.y;
@@ -671,8 +675,14 @@ dropWaterTo(50);
       if (age >= TUNE.predatorApproachSeconds){
         const victims = chooseVictimsForPredator(predator.tier);
         if (!victims){
-          oysters = [];
-          msg(`🟥 ${tierName(predator.tier)} predator overwhelmed the reef.`);
+          // fair failstate: heavy damage instead of instant wipe
+          const tier = predator.tier;
+          const dmg = tier === 1 ? 2 : tier === 2 ? 3 : tier === 3 ? 5 : 7;
+          const targets = oysters.slice().sort((a,b)=>a.level-b.level).slice(0, 3);
+          for (const o of targets){
+            o.health = clamp(o.health - dmg, 0, o.maxHealth);
+          }
+          msg(`🟥 ${tierName(tier)} predator attacked! Your reef was too small and took heavy damage.`);
         } else {
           eatVictims(victims);
           msg(`🦀 ${tierName(predator.tier)} predator ate ${victims.length} oyster${victims.length===1?"":"s"}.`);
@@ -710,7 +720,6 @@ dropWaterTo(50);
     ctx.fillStyle = "rgba(255,255,255,0.035)";
     ctx.fill();
 
-    // floaters
     for (const f of floaters){
       const p = pxFromN(f.xN, f.yN);
       ctx.beginPath();
@@ -723,7 +732,6 @@ dropWaterTo(50);
       ctx.stroke();
     }
 
-    // collection circles
     for (const o of oysters){
       const p = pxFromN(o.xN, o.yN);
       const cr = collectRadius(o.level);
@@ -733,7 +741,6 @@ dropWaterTo(50);
       ctx.stroke();
     }
 
-    // oysters
     for (const o of oysters){
       const p = pxFromN(o.xN, o.yN);
       const r = oysterRadius(o.level);
@@ -773,7 +780,6 @@ dropWaterTo(50);
       ctx.fillRect(p.x - 18, p.y - r - 2, 36*b, 4);
     }
 
-    // predator
     if (predator?.active){
       const tier = predator.tier;
       const col = PRED[tier]?.color || "rgba(255,80,120,0.9)";
@@ -799,7 +805,6 @@ dropWaterTo(50);
       ctx.fillText(`${tierName(tier)}`, predator.x, predator.y + 4);
     }
 
-    // placement hint
     if (placing && !gameOver){
       ctx.fillStyle = "rgba(0,0,0,0.35)";
       ctx.fillRect(12, 12, 330, 30);
@@ -809,7 +814,6 @@ dropWaterTo(50);
       ctx.fillText(`Place mode: click to place an oyster (cost ${TUNE.placeOysterCost}).`, 20, 32);
     }
 
-    // game over
     if (gameOver){
       ctx.fillStyle = "rgba(0,0,0,0.62)";
       ctx.fillRect(0,0,W(),H());
@@ -904,7 +908,7 @@ dropWaterTo(50);
     oysters.push(start);
     selectedId = start.id;
 
-    msg("Grace period: place a couple oysters, then upgrade before human pressure ramps up.");
+    msg("Grace period: place oysters, then upgrade before predators + pollution ramp up.");
     lastTime = performance.now();
   }
 
